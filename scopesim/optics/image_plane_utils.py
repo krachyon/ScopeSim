@@ -285,7 +285,7 @@ class AnisocadoModel(FittableImageModel):
     @property
     # TODO base this on a cutoff for included flux or something...
     def bounding_box(self):
-        return ((self.x_0-150, self.x_0+150), (self.y_0-150, self.y_0+150))
+        return ((self.y_0-150, self.y_0+150), (self.x_0-150, self.x_0+150))
 
 
 def make_anisocado_model(oversampling=2, degree=5, seed=0, offaxis=(0, 0)):
