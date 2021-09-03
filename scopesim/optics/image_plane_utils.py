@@ -263,10 +263,42 @@ def add_table_to_imagehdu(table, canvas_hdu, sub_pixel=True, wcs_suffix=""):
     if sub_pixel is True:
         canvas_hdu = _add_subpixel_sources_to_canvas(canvas_hdu, xpix, ypix, f,
                                                      mask)
+    elif sub_pixel == "psf_eval":
+        canvas_hdu = _evaluate_psf_to_canvas(canvas_hdu, xpix, ypix, f, mask)
     else:
         canvas_hdu = _add_intpixel_sources_to_canvas(canvas_hdu, xpix, ypix, f,
                                                      mask)
 
+    return canvas_hdu
+
+from anisocado import AnalyticalScaoPsf
+from photutils import FittableImageModel
+
+class AnisocadoModel(FittableImageModel):
+    def __repr__(self):
+        return super().__repr__() + f' oversampling: {self.oversampling}'
+
+    def __str__(self):
+        return super().__str__() + f' oversampling: {self.oversampling}'
+
+
+def make_anisocado_model(oversampling=2, degree=5, seed=0, offaxis=(0, 0)):
+    img = AnalyticalScaoPsf(pixelSize=0.004/oversampling, N=80*oversampling+1, seed=seed).shift_off_axis(*offaxis)
+    return AnisocadoModel(img, oversampling=oversampling, degree=degree)
+
+
+def _evaluate_psf_to_canvas(canvas_hdu, xpix, ypix, flux, mask):
+    model = make_anisocado_model()
+    img = canvas_hdu.data
+
+    y, x = np.indices(img.shape)
+    norm = np.sum(model(x-x.mean(), y-y.mean()))
+
+    for xshift, yshift, f, masked in zip(xpix, ypix, flux, mask):
+        if masked:
+            # 0.5 because annoying pixel convention does not hit center
+            img += model(x-xshift+0.5, y-yshift+0.5)/norm * f.value
+    canvas_hdu.data = img
     return canvas_hdu
 
 
