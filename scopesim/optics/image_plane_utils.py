@@ -274,12 +274,18 @@ def add_table_to_imagehdu(table, canvas_hdu, sub_pixel=True, wcs_suffix=""):
 from anisocado import AnalyticalScaoPsf
 from photutils import FittableImageModel
 
+
 class AnisocadoModel(FittableImageModel):
     def __repr__(self):
         return super().__repr__() + f' oversampling: {self.oversampling}'
 
     def __str__(self):
         return super().__str__() + f' oversampling: {self.oversampling}'
+
+    @property
+    # TODO base this on a cutoff for included flux or something...
+    def bounding_box(self):
+        return ((self.x_0-150, self.x_0+150), (self.y_0-150, self.y_0+150))
 
 
 def make_anisocado_model(oversampling=2, degree=5, seed=0, offaxis=(0, 0)):
@@ -291,13 +297,14 @@ def _evaluate_psf_to_canvas(canvas_hdu, xpix, ypix, flux, mask):
     model = make_anisocado_model()
     img = canvas_hdu.data
 
-    y, x = np.indices(img.shape)
-    norm = np.sum(model(x-x.mean(), y-y.mean()))
-
+    normalize = np.sum(model.oversampling)
     for xshift, yshift, f, masked in zip(xpix, ypix, flux, mask):
         if masked:
             # 0.5 because annoying pixel convention does not hit center
-            img += model(x-xshift+0.5, y-yshift+0.5)/norm * f.value
+            model.x_0 = xshift - 0.5
+            model.y_0 = yshift - 0.5
+            model.flux = f.value * normalize
+            model.render(img)
     canvas_hdu.data = img
     return canvas_hdu
 
