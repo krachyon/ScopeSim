@@ -5,6 +5,7 @@ from astropy import units as u, wcs
 from astropy.io import fits
 from astropy.table import Table
 from scipy.ndimage import interpolation as ndi
+from tqdm.auto import tqdm
 
 from .. import utils
 
@@ -271,34 +272,15 @@ def add_table_to_imagehdu(table, canvas_hdu, sub_pixel=True, wcs_suffix=""):
 
     return canvas_hdu
 
-from anisocado import AnalyticalScaoPsf
-from photutils import FittableImageModel
-
-
-class AnisocadoModel(FittableImageModel):
-    def __repr__(self):
-        return super().__repr__() + f' oversampling: {self.oversampling}'
-
-    def __str__(self):
-        return super().__str__() + f' oversampling: {self.oversampling}'
-
-    @property
-    # TODO base this on a cutoff for included flux or something...
-    def bounding_box(self):
-        return ((self.y_0-200, self.y_0+200), (self.x_0-200, self.x_0+200))
-
-
-def make_anisocado_model(oversampling=2, degree=5, seed=0, offaxis=(0, 0)):
-    img = AnalyticalScaoPsf(pixelSize=0.004/oversampling, N=400*oversampling+1, seed=seed).shift_off_axis(*offaxis)
-    return AnisocadoModel(img, oversampling=oversampling, degree=degree)
-
 
 def _evaluate_psf_to_canvas(canvas_hdu, xpix, ypix, flux, mask):
-    model = make_anisocado_model()
+
+    model = utils.from_currsys('!SIM.sub_pixel.psf')
     img = canvas_hdu.data
 
     normalize = np.sum(model.oversampling)
-    for xshift, yshift, f, masked in zip(xpix, ypix, flux, mask):
+    print('placing sources...')
+    for xshift, yshift, f, masked in tqdm(list(zip(xpix, ypix, flux, mask))):
         if masked:
             # 0.5 because annoying pixel convention does not hit center
             model.x_0 = xshift - 0.5
