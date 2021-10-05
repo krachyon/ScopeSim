@@ -282,9 +282,8 @@ def _evaluate_psf_to_canvas(canvas_hdu, xpix, ypix, flux, mask):
     print('placing sources...')
     for xshift, yshift, f, masked in tqdm(list(zip(xpix, ypix, flux, mask))):
         if masked:
-            # 0.5 because annoying pixel convention does not hit center
-            model.x_0 = xshift - 0.5
-            model.y_0 = yshift - 0.5
+            model.x_0 = xshift
+            model.y_0 = yshift
             model.flux = f.value * normalize
             model.render(img)
     canvas_hdu.data = img
