@@ -278,7 +278,7 @@ def _evaluate_psf_to_canvas(canvas_hdu, xpix, ypix, flux, mask):
     model = utils.from_currsys('!SIM.sub_pixel.psf')
     img = canvas_hdu.data
 
-    normalize = np.sum(model.oversampling)
+    normalize = np.sum(model.oversampling)/np.sum(model.data)
     print('placing sources...')
     for xshift, yshift, f, masked in tqdm(list(zip(xpix, ypix, flux, mask))):
         if masked:
