@@ -278,14 +278,34 @@ def _evaluate_psf_to_canvas(canvas_hdu, xpix, ypix, flux, mask):
     model = utils.from_currsys('!SIM.sub_pixel.psf')
     img = canvas_hdu.data
 
+    interpolator = model.interpolator
+    oversampling = model.oversampling
+    normalization_constant = model._normalization_constant  # noqa
+    origin = model.origin
+
+    xs = np.arange(0, img.shape[1]).astype(float)
+    ys = np.arange(0, img.shape[0]).astype(float)
+
+    xs += origin[0] / oversampling[0]
+    ys += origin[1] / oversampling[1]
+
+    xbound = model.bounding_box['x']
+    xextent = xbound.upper-xbound.lower
+    ybound = model.bounding_box['y']
+    yextent = ybound.upper-ybound.lower
+
     normalize = np.sum(model.oversampling)/np.sum(model.data)
     print('placing sources...')
     for xshift, yshift, f, masked in tqdm(list(zip(xpix, ypix, flux, mask))):
         if masked:
-            model.x_0 = xshift
-            model.y_0 = yshift
-            model.flux = f.value * normalize
-            model.render(img)
+            # prepare sparse grid
+            x_selector = slice(max(0,int(xshift-xextent/2)), min(int(xshift+xextent/2),img.shape[1]))
+            y_selector = slice(max(0,int(yshift-yextent/2)), min(int(yshift+yextent/2),img.shape[0]))
+            xs_selected = xs[x_selector]
+            ys_selected = ys[y_selector]
+            small_img = f.value * normalize*interpolator(oversampling[0] * (xs_selected - xshift), oversampling[1] * (ys_selected - yshift)).T
+            img[y_selector, x_selector]+=small_img
+
     canvas_hdu.data = img
     return canvas_hdu
 
