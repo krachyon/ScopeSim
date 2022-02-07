@@ -33,7 +33,7 @@
 """
 
 import pickle
-import warnings
+import logging
 from copy import deepcopy
 import numpy as np
 
@@ -48,6 +48,7 @@ from ..optics.image_plane import ImagePlane
 from ..optics import image_plane_utils as imp_utils
 from .source_utils import validate_source_input, convert_to_list_of_spectra, \
     photons_in_range
+from . import source_templates as src_tmp
 
 from ..base_classes import SourceBase
 from .. import utils
@@ -56,22 +57,22 @@ from .. import utils
 class Source(SourceBase):
     """
     Create a source object from a file or from arrays
-    
+
     A Source object must consist of a spatial and a spectral description
     of the on-sky source. Many sources can be added together and kept
     in memory as a single Source object.
-    
+
     The spatial descriptions are kept in the ``<Source>.fields`` list,
     while the spectral descriptions are in ``<Source>.spectra`` list.
-    
+
     The spatial description can be built from any combination of:
-    
+
     * a list of arrays (like in SimCADO >v0.5)
     * astropy Table objects
     * astropy ImageHDU objects
     * on disk FITS files
     * on disk ASCII tables
-    
+
     while the spectral descriptions can be passed as either
     ``synphot.SourceSpectrum`` objects, or a set of two equal length arrays
     for wavelength and flux.
@@ -83,6 +84,7 @@ class Source(SourceBase):
         - ``table=<astropy.Table>, lam=<array>, spectra=<list of array>
         - ``image_hdu=<fits.ImageHDU>, spectra=<list of synphot.SourceSpectrum>``
         - ``image_hdu=<fits.ImageHDU>, lam=<array>, spectra=<list of array>
+        - ``image_hdu=<fits.ImageHDU>, flux=<astropy.Quantity>
 
         Old SimCADO-style input
         - ``x=<array>, y=<array>, ref=<array>, spectra=<list of synphot.SourceSpectrum>``
@@ -98,8 +100,8 @@ class Source(SourceBase):
 
     lam : np.array
         [um] Wavelength bins of length (m)
-    spectra : np.array
-        [ph/s/m2/bin] A (n, m) array with n spectra, each with m spectral bins
+    spectra : list of synphot.SourceSpectra
+        [ph/s/cm2/AA]
     x, y : np.array
         [arcsec] coordinates of where the emitting files are relative to the
         centre of the field of view
@@ -108,11 +110,15 @@ class Source(SourceBase):
         ``flux(x[i], y[i]) = spectra[ref[i]] * weight[i]``
     weight : np.array
         A weighting to scale the relevant spectrum for each position
-
     table : astropy.Table
-
     image_hdu : fits.ImageHDU
-
+        [arcsec-2] The .data array is simply a map of weights for the assiciated
+        spectrum referenced by .header["SPEC_REF].
+        Surface brightness values are assumed to be per arcsec2
+    flux : astropy.Quantity
+        [u.mag, u.ABmag, u.Jy] Flux values are converted to a reference spectrum
+        that is referenced by image_hdu.header["SPEC_REF"].
+        flux can only be used in conjuction with image_hdu
 
     Attributes
     ----------
@@ -130,38 +136,55 @@ class Source(SourceBase):
 
     """
 
-    def __init__(self, filename=None,
+    def __init__(self, filename=None, cube=None, ext=0,
                  lam=None, spectra=None, x=None, y=None, ref=None, weight=None,
-                 table=None, image_hdu=None, **kwargs):
+                 table=None, image_hdu=None, flux=None, **kwargs):
 
         self.meta = {}
         self.meta.update(kwargs)
-        
+
         self.fields = []
         self.spectra = []
 
         self.bandpass = None
 
         valid = validate_source_input(lam=lam, x=x, y=y, ref=ref, weight=weight,
-                                      spectra=spectra, table=table,
-                                      image_hdu=image_hdu, filename=filename)
+                                      spectra=spectra, table=table, cube=cube,
+                                      ext=ext, image_hdu=image_hdu, flux=flux,
+                                      filename=filename)
 
-        spectra = convert_to_list_of_spectra(spectra, lam)
+        if spectra is not None:
+            spectra = convert_to_list_of_spectra(spectra, lam)
 
         if filename is not None and spectra is not None:
-            self._from_file(filename, spectra)
+            self._from_file(filename, spectra, flux)
+
+        elif cube is not None:
+            self._from_cube(cube=cube, ext=ext)
 
         elif table is not None and spectra is not None:
             self._from_table(table, spectra)
 
         elif image_hdu is not None and spectra is not None:
-            self._from_imagehdu(image_hdu, spectra)
+            self._from_imagehdu_and_spectra(image_hdu, spectra)
+
+        elif image_hdu is not None and flux is not None:
+            self._from_imagehdu_and_flux(image_hdu, flux)
+
+        elif image_hdu is not None and flux is None and spectra is None:
+            if image_hdu.header.get("BUNIT") is not None:
+                self._from_imagehdu_only(image_hdu)
+            else:
+                msg = f"image_hdu must be accompanied by either spectra or flux:\n" \
+                      f"spectra: {spectra}, flux: {flux}"
+                logging.exception(msg)
+                raise ValueError(msg)
 
         elif x is not None and y is not None and \
                 ref is not None and spectra is not None:
             self._from_arrays(x, y, ref, weight, spectra)
 
-    def _from_file(self, filename, spectra):
+    def _from_file(self, filename, spectra, flux):
         filename = utils.find_file(filename)
 
         if utils.is_fits(filename):
@@ -170,7 +193,12 @@ class Source(SourceBase):
             hdr = fits.getheader(filename)
             if fits_type == "image":
                 image = fits.ImageHDU(data=data, header=hdr)
-                self._from_imagehdu(image, spectra)
+                if spectra is not None:
+                    self._from_imagehdu_and_spectra(image, spectra)
+                elif flux is not None:
+                    self._from_imagehdu_and_flux(image, flux)
+                else:
+                    self._from_imagehdu_only(image)
             elif fits_type == "bintable":
                 hdr1 = fits.getheader(filename, 1)
                 hdr.update(hdr1)
@@ -189,13 +217,32 @@ class Source(SourceBase):
         self.fields += [tbl]
         self.spectra += spectra
 
-    def _from_imagehdu(self, image_hdu, spectra):
+    def _from_imagehdu_and_spectra(self, image_hdu, spectra):
+
+        if not image_hdu.header.get("BG_SRC"):
+            image_hdu.header["CRVAL1"] = 0
+            image_hdu.header["CRVAL2"] = 0
+            image_hdu.header["CRPIX1"] = image_hdu.header["NAXIS1"] / 2
+            image_hdu.header["CRPIX2"] = image_hdu.header["NAXIS2"] / 2
+            # .. todo:: find where the actual problem is with negative CDELTs
+            # .. todo:: --> abs(pixel_scale) in header_from_list_of_xy
+            if image_hdu.header["CDELT1"] < 0:
+                image_hdu.header["CDELT1"] *= -1
+                image_hdu.data = image_hdu.data[:, ::-1]
+            if image_hdu.header["CDELT2"] < 0:
+                image_hdu.header["CDELT2"] *= -1
+                image_hdu.data = image_hdu.data[::-1, :]
+
+        if isinstance(image_hdu, fits.PrimaryHDU):
+            image_hdu = fits.ImageHDU(data=image_hdu.data,
+                                      header=image_hdu.header)
+
         if spectra is not None and len(spectra) > 0:
             image_hdu.header["SPEC_REF"] = len(self.spectra)
             self.spectra += spectra
         else:
             image_hdu.header["SPEC_REF"] = ""
-            warnings.warn("No spectrum was provided. SPEC_REF set to ''. "
+            logging.warning("No spectrum was provided. SPEC_REF set to ''. "
                           "This could cause problems later")
             raise NotImplementedError
 
@@ -207,6 +254,53 @@ class Source(SourceBase):
             image_hdu.header["CDELT"+str(i)] = val * unit.to(u.deg)
 
         self.fields += [image_hdu]
+
+    def _from_imagehdu_and_flux(self, image_hdu, flux):
+        if isinstance(flux, u.Unit):
+            flux = 1 * flux
+
+        spec_template = src_tmp.vega_spectrum
+        if isinstance(flux, u.Quantity):
+            if flux.unit.physical_type == "spectral flux density":  # ABmag and Jy
+                spec_template = src_tmp.ab_spectrum
+                flux = flux.to(u.ABmag)
+            flux = flux.value
+        spectra = [spec_template(flux)]
+        self._from_imagehdu_and_spectra(image_hdu, spectra)
+
+    def _from_imagehdu_only(self, image_hdu):
+        bunit = image_hdu.header.get("BUNIT")
+        try:
+            bunit = u.Unit(bunit)
+        except:
+            f"Astropy cannot parse BUNIT [{bunit}].\n" \
+            f"You can bypass this checkby passing an astropy Unit to the flux parameter:\n" \
+            f">>> Source(image_hdu=..., flux=u.Unit(bunit), ...)"
+
+        ang_i = -1
+        phys_types = [base.physical_type for base in bunit.bases]
+        if "solid angle" in phys_types or "angle" in phys_types:
+            ang_i = np.argwhere([(pt == "solid angle" or pt == "angle")
+                                 for pt in phys_types])[0][0]
+            solid_angle = bunit.bases[ang_i] ** bunit.powers[ang_i]
+            scale_factor = solid_angle.to(u.arcsec**-2)
+
+        else:
+            hdr = image_hdu.header
+            pixel_area = hdr["CDELT1"] * u.Unit(hdr["CUNIT1"]) * \
+                         hdr["CDELT2"] * u.Unit(hdr["CUNIT2"])
+            scale_factor = (1 / pixel_area).to(u.arcsec**-2).value
+
+        image_hdu.data *= scale_factor
+        image_hdu.header["SOLIDANG"] = "arcsec-2"
+
+        flux_unit = u.Unit("")
+        for i in range(len(bunit.bases)):
+            if i != ang_i:
+                flux_unit *= (bunit.bases[i] ** bunit.powers[i])
+
+        value = 0 if flux_unit in [u.mag, u.ABmag] else 1
+        self._from_imagehdu_and_flux(image_hdu, value*flux_unit)
 
     def _from_arrays(self, x, y, ref, weight, spectra):
         if weight is None:
@@ -222,8 +316,68 @@ class Source(SourceBase):
         self.fields += [tbl]
         self.spectra += spectra
 
+    def _from_cube(self, cube, ext=0):
+        """
+
+        Parameters
+        ----------
+        cube: a file, HDUList or a PrimaryHDU object containing the cube
+        ext: int
+            the extension where the cube is located if applicable.
+
+        """
+        if isinstance(cube, fits.HDUList):
+            data = cube[ext].data
+            header = cube[ext].header
+        elif isinstance(cube, (fits.PrimaryHDU, fits.ImageHDU)):
+            data = cube.data
+            header = cube.header
+        else:
+            with fits.open(cube) as hdul:
+                data = hdul[ext].data
+                header = hdul[ext].header
+
+        try:
+            bunit = header['BUNIT']
+            u.Unit(bunit)
+        except KeyError as e:
+            bunit = "erg / (s cm2 arcsec2)"
+            logging.warning(f"Keyword 'BUNIT' not found, setting to {bunit} by default")
+        except ValueError as e:
+            print("'BUNIT' keyword is malformed", e)
+            raise
+
+        if header["CTYPE3"].lower() not in ["freq", 'wave', "awav", 'wavelength']:
+            raise ValueError("Only ['FREQ','WAVE','AWAV', 'WAVELENGTH'] are supported")
+
+        target_cube = data
+        target_hdr = header.copy()
+        target_hdr["BUNIT"] = bunit
+
+        cube_hdu = fits.ImageHDU(data=target_cube, header=target_hdr)
+
+        self.fields += [cube_hdu]
+
+    @property
+    def table_fields(self):
+        fields = [field for field in self.fields if isinstance(field, Table)]
+        return fields
+
+    @property
+    def image_fields(self):
+        fields = [field for field in self.fields if
+                  isinstance(field, fits.ImageHDU) and field.header["NAXIS"] == 2]
+        return fields
+
+    @property
+    def cube_fields(self):
+        fields = [field for field in self.fields if
+                  isinstance(field, fits.ImageHDU) and field.header["NAXIS"] == 3]
+        return fields
+
+    # ..todo: rewrite this method
     def image_in_range(self, wave_min, wave_max, pixel_scale=1*u.arcsec,
-                       layers=None, area=None, order=1, sub_pixel=False):
+                       layers=None, area=None, spline_order=1, sub_pixel=False):
         if layers is None:
             layers = range(len(self.fields))
         fields = [self.fields[ii] for ii in layers]
@@ -264,7 +418,8 @@ class Source(SourceBase):
             else:
                 continue
 
-            im_plane.add(hdu_or_table, sub_pixel=sub_pixel, order=order)
+            im_plane.add(hdu_or_table, sub_pixel=sub_pixel,
+                         spline_order=spline_order)
 
         return im_plane
 
@@ -338,7 +493,7 @@ class Source(SourceBase):
                 y = utils.quantity_from_table("y", self.fields[ii], u.arcsec)
                 y += utils.quantify(dy, u.arcsec)
                 self.fields[ii]["y"] = y
-            elif isinstance(self.fields[ii], fits.ImageHDU):
+            elif isinstance(self.fields[ii], (fits.ImageHDU, fits.PrimaryHDU)):
                 dx = utils.quantify(dx, u.arcsec).to(u.deg)
                 dy = utils.quantify(dy, u.arcsec).to(u.deg)
                 self.fields[ii].header["CRVAL1"] += dx.value
@@ -376,7 +531,7 @@ class Source(SourceBase):
         for c, field in zip(clrs, self.fields):
             if isinstance(field, Table):
                 plt.plot(field["x"], field["y"], c+".")
-            elif isinstance(field, fits.ImageHDU):
+            elif isinstance(field, (fits.ImageHDU, fits.PrimaryHDU)):
                 x, y = imp_utils.calc_footprint(field.header)
                 x *= 3600   # Because ImageHDUs are always in CUNIT=DEG
                 y *= 3600
@@ -415,7 +570,7 @@ class Source(SourceBase):
                 msg += "[{}]: Table with {} rows, referencing spectra {} \n" \
                        "".format(ii, tbl_len, num_spec)
             elif isinstance(self.fields[ii], (fits.ImageHDU, fits.PrimaryHDU)):
-                im_size = self.fields[ii].data.shape
+                im_size = self.fields[ii].data.shape if self.fields[ii].data is not None else "<empty>"
                 num_spec = "-"
                 if self.fields[ii].header["SPEC_REF"] != "":
                     num_spec = self.fields[ii].header["SPEC_REF"]

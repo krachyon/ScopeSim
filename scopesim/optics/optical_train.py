@@ -152,7 +152,7 @@ class OpticalTrain:
         if update:
             self.update(**kwargs)
 
-        self.set_focus(kwargs)    # put focus back on current instrument package
+        self.set_focus(**kwargs)    # put focus back on current instrument package
 
         # ..todo:: check if orig_source is a pointer, or a data array
         source = orig_source.make_copy()
@@ -163,16 +163,18 @@ class OpticalTrain:
 
         # [3D - Atmospheric shifts, PSF, NCPAs, Grating shift/distortion]
         fovs = self.fov_manager.fovs
-        for fov_i, fov in enumerate(fovs):
+        for fov in fovs:
             # print("FOV", fov_i+1, "of", n_fovs, flush=True)
             # .. todo: possible bug with bg flux not using plate_scale
             #          see fov_utils.combine_imagehdu_fields
             fov.extract_from(source)
-            fov.view()
 
+            hdu_type = "cube" if self.fov_manager.is_spectroscope else "image"
+            fov.view(hdu_type)
             for effect in self.optics_manager.fov_effects:
                 fov = effect.apply_to(fov)
 
+            fov.flatten()
             self.image_planes[fov.image_plane_id].add(fov.hdu, wcs_suffix="D")
             # ..todo: finish off the multiple image plane stuff
 
@@ -205,9 +207,10 @@ class OpticalTrain:
 
         hdus = []
         for i, detector_array in enumerate(self.detector_arrays):
+            array_effects = self.optics_manager.detector_array_effects
             dtcr_effects = self.optics_manager.detector_effects
-            hdu = detector_array.readout(self.image_planes, dtcr_effects,
-                                         **kwargs)
+            hdu = detector_array.readout(self.image_planes, array_effects,
+                                         dtcr_effects, **kwargs)
 
             if filename is not None and isinstance(filename, str):
                 fname = filename
@@ -219,7 +222,7 @@ class OpticalTrain:
 
         return hdus
 
-    def set_focus(self, kwargs):
+    def set_focus(self, **kwargs):
         self.cmds.update(**kwargs)
         dy = self.cmds.default_yamls
         if len(dy) > 0 and "packages" in dy:
