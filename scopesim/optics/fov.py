@@ -15,6 +15,22 @@ from . import image_plane_utils as imp_utils
 from ..base_classes import SourceBase, FieldOfViewBase, PoorMansHeader
 from .. import utils
 
+from tqdm.auto import tqdm
+
+def _evaluate_psf_to_canvas(canvas_hdu, xpix, ypix, flux):
+
+    model = utils.from_currsys('!SIM.sub_pixel.psf')
+    img = canvas_hdu.data
+
+    normalize = np.sum(model.oversampling)/np.sum(model.data)
+    print('placing sources...')
+    for xshift, yshift, f in tqdm(list(zip(xpix, ypix, flux))):
+        model.x_0 = xshift
+        model.y_0 = yshift
+        model.flux = f * normalize
+        model.render(img)
+    canvas_hdu.data = img
+    return canvas_hdu
 
 class FieldOfView(FieldOfViewBase):
     """
@@ -313,7 +329,11 @@ class FieldOfView(FieldOfViewBase):
             xpix, ypix = imp_utils.val2pix(self.header,
                                            field["x"] / 3600,
                                            field["y"] / 3600)
-            if utils.from_currsys(self.meta["sub_pixel"]):
+
+            if utils.from_currsys(self.meta["sub_pixel"]) == 'psf_eval':
+                eval_flux = np.array([fluxes[ref] for ref in field["ref"]]) * np.array(field["weight"])
+                _evaluate_psf_to_canvas(canvas_image_hdu, xpix, ypix, eval_flux)
+            elif utils.from_currsys(self.meta["sub_pixel"]):
                 for i, row in enumerate(field):
                     xs, ys, fracs = imp_utils.sub_pixel_fractions(xpix[i],
                                                                   ypix[i])
