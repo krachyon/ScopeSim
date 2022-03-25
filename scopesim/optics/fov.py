@@ -166,7 +166,7 @@ class FieldOfView(FieldOfViewBase):
         return self.hdu
 
     def flatten(self):
-        if self.hdu.header["NAXIS"] == 3:
+        if self.hdu and self.hdu.header["NAXIS"] == 3:
             image = np.sum(self.hdu.data, axis=0)
             self.hdu.data = image
 
@@ -351,8 +351,9 @@ class FieldOfView(FieldOfViewBase):
                     for x, y, f in zip(xs, ys, fracs):
                         canvas_image_hdu.data[y, x] += fluxes[ref] * weight * f
             else:
-                x = np.array(xpix + 0.5).astype(int)
-                y = np.array(ypix + 0.5).astype(int)     # quickest way to round
+                # Note: these had x/ypix+0.5 until a06ab75
+                x = np.array(xpix).astype(int)
+                y = np.array(ypix).astype(int)     # quickest way to round
                 f = np.array([fluxes[ref] for ref in field["ref"]])
                 weight = np.array(field["weight"])
                 canvas_image_hdu.data[y, x] += f * weight
@@ -616,9 +617,11 @@ class FieldOfView(FieldOfViewBase):
                                            return_quantity=True)
         elif len(self.spectra) > 0:
             wavesets = [spec.waveset for spec in self.spectra.values()]
-            _waveset = np.unique(np.concatenate(wavesets))
+            _waveset = np.concatenate(wavesets)
         else:
             _waveset = self.waverange * u.um
+
+        _waveset = np.unique(_waveset)
 
         return _waveset.to(u.um)
 
